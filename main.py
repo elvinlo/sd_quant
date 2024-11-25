@@ -51,7 +51,12 @@ parser.add_argument("--save_images", action='store_true', help="save images duri
 parser.add_argument('--print_freq', default=50, type=int, help='print every k batches')
 parser.add_argument('--print_model', action='store_true', help='print model modules')
 parser.add_argument("--tag", default="", type=str, help="experiment identifier (string to prepend to save directory names")
-        
+parser.add_argument('--activations', action='store_true', help='collect activation statistics')
+parser.add_argument('--dynamic_quantize', action='store_true', help='dynamic quantization of model')
+parser.add_argument('--static_quantize', action='store_true', help='static quantization of model')
+parser.add_argument('--quantize_bitwidth', default=8, type=int, help='number of bits to quantize weights to (not activations)')
+
+
 
 def get_experiment_str(args):
     experiment_str = args.tag + '_' + datetime.now().strftime('%Y-%m-%d_%H-%M/')
@@ -166,9 +171,10 @@ class DataModuleFromConfig(pl.LightningDataModule):
 
 
 def evaluate_accuracy(model, dataloader=None, args=None):
+    print (args.activations)
     model.eval()
     save_dir = f'./results/{args.experiment_str}/'
-
+    
     if args.monitor_fid:
         acc_metric = FrechetInceptionDistance().set_dtype(torch.float64).to(args.device)
     else:
@@ -182,13 +188,14 @@ def evaluate_accuracy(model, dataloader=None, args=None):
         for i, batch in enumerate(dataloader):
             # check if we want to plot this batch
             plot = args.plot and (i < 20)
-
+            activations = args.activations
+            
             batch[model.first_stage_key] = batch[model.first_stage_key].to(args.device)
-            samples, images, prompts = model.sample_images(batch, batch_idx=i, epoch=None, save_dir=save_dir, plot=plot)
+            samples, images, prompts = model.sample_images(batch, batch_idx=i, epoch=None, save_dir=save_dir, plot=plot, activations = activations)
 
-            if plot and args.plot_only:
+            if (plot and args.plot_only) or activations:
                 exit()
-
+            
             # save the first 10 images, and then save one image every 100 iterations
             if args.evaluate and args.save_images and (args.accelerator is None or args.accelerator.is_main_process) and (i < 10 or i % 100 == 0):
                 filename = f"{i:05}.png"
@@ -279,7 +286,60 @@ if __name__ == "__main__":
     train_dataloader, val_dataloader, test_dataloader = data._train_dataloader(), data._val_dataloader(), data._test_dataloader()
 
     # TODO: quantization
-    #
+
+    def quantize_weight(tensor, num_bits=8):
+        qmin = -(2 ** (num_bits - 1))
+        qmax = (2 ** (num_bits - 1)) - 1
+
+        max_val = tensor.abs().max()
+        if max_val == 0:
+            scale = 1.0
+        else:
+            scale = max_val / qmax
+
+        # Quantize
+        q_x = (tensor / scale).round().clamp(qmin, qmax)
+        # Dequantize
+        dq_x = q_x * scale
+
+        return dq_x
+
+    def quantize_model_weights(model, num_bits=8):
+        for name, module in model.named_modules():
+            if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
+                with torch.no_grad():
+                    module.weight.data = quantize_weight(module.weight.data, num_bits)
+                    if module.bias is not None:
+                        module.bias.data = quantize_weight(module.bias.data, num_bits)
+
+    def quantize_activation(tensor, num_bits=8):
+        qmin = 0
+        qmax = (2 ** num_bits) - 1
+
+        min_val = tensor.min()
+        max_val = tensor.max()
+        if min_val == max_val:
+            scale = 1.0
+            zero_point = 0
+        else:
+            scale = (max_val - min_val) / (qmax - qmin)
+            zero_point = qmin - min_val / scale
+
+        # Quantize
+        q_x = ((tensor / scale) + zero_point).round().clamp(qmin, qmax)
+        # Dequantize
+        dq_x = (q_x - zero_point) * scale
+
+        return dq_x
+
+    def activation_quantization_hook(module, input, output):
+        return quantize_activation(output, num_bits=8)
+
+    def register_activation_quantization_hooks(model):
+        for name, module in model.named_modules():
+            if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
+                module.register_forward_hook(activation_quantization_hook)
+
     
     # load from checkpoint
     if args.checkpoint is None or not os.path.isfile(args.checkpoint):
@@ -307,7 +367,16 @@ if __name__ == "__main__":
     #     args.train_dataloader_len = len(train_dataloader)
     #     args.val_dataloader_len = len(val_dataloader)
     #     args.test_dataloader_len = len(test_dataloader)
-    
+
+    # Apply quantization before moving the model to GPU
+    if args.dynamic_quantize:
+        print(f"Applying dynamic {args.quantize_bitwidth}-bit quantization (W{args.quantize_bitwidth}A8) to the model's Linear and Conv2d layers...")
+        quantize_model_weights(model.model, num_bits=args.quantize_bitwidth)
+        register_activation_quantization_hooks(model.model)
+    elif args.static_quantize:
+        print(f"Applying static {args.quantize_bitwidth}-bit quantization (W{args.quantize_bitwidth}A8) to the model's Linear and Conv2d layers...")
+
+
     model = model.to(args.device)
 
     if args.evaluate:

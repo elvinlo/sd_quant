@@ -2,10 +2,11 @@
 
 import torch
 import numpy as np
+import os
 from tqdm import tqdm
 
 from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, make_ddim_timesteps, noise_like, extract_into_tensor
-from ldm.visualization import register_data_collector_hooks, plot_activations
+from ldm.visualization import register_data_collector_hooks, plot_activations, collect_activation_statistics
 
 class DDIMSampler(object):
     def __init__(self, model, schedule="linear", device=torch.device("cuda"), **kwargs):
@@ -78,6 +79,7 @@ class DDIMSampler(object):
                ucg_schedule=None,
                disable_prints=True,
                plot=False,
+               activations=False,
                plot_batch_idx=None,
                save_dir=None,
                **kwargs
@@ -124,6 +126,7 @@ class DDIMSampler(object):
                                                     ucg_schedule=ucg_schedule,
                                                     disable_prints=True,
                                                     plot=plot,
+                                                    activations=activations,
                                                     plot_batch_idx=plot_batch_idx,
                                                     save_dir=save_dir
                                                     )
@@ -136,7 +139,7 @@ class DDIMSampler(object):
                       mask=None, x0=None, img_callback=None, log_every_t=100,
                       temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
                       unconditional_guidance_scale=1., unconditional_conditioning=None, dynamic_threshold=None,
-                      ucg_schedule=None, disable_prints=True, plot=False, plot_batch_idx=None, save_dir=None):
+                      ucg_schedule=None, disable_prints=True, plot=False, activations=False, plot_batch_idx=None, save_dir=None):
         device = self.model.betas.device
         b = shape[0]
         if x_T is None:
@@ -155,6 +158,8 @@ class DDIMSampler(object):
         total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
         if not disable_prints:
             print(f"Running DDIM Sampling with {total_steps} timesteps")
+        
+        
 
         iterator = tqdm(time_range, desc='DDIM Sampler', total=total_steps, disable=disable_prints)
 
@@ -178,7 +183,10 @@ class DDIMSampler(object):
                                       unconditional_guidance_scale=unconditional_guidance_scale,
                                       unconditional_conditioning=unconditional_conditioning,
                                       dynamic_threshold=dynamic_threshold,
-                                      plot=plot, plot_batch_idx=plot_batch_idx, save_dir=save_dir
+                                      plot=plot, 
+                                      activations=activations,
+                                      plot_batch_idx=plot_batch_idx, 
+                                      save_dir=save_dir, 
                                       )
             img, pred_x0 = outs
             if callback: callback(i)
@@ -188,19 +196,22 @@ class DDIMSampler(object):
                 intermediates['x_inter'].append(img)
                 intermediates['pred_x0'].append(pred_x0)
 
+        
+        
         return img, intermediates
 
     @torch.no_grad()
     def p_sample_ddim(self, x, c, t, index, repeat_noise=False, use_original_steps=False, quantize_denoised=False,
                       temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
                       unconditional_guidance_scale=1., unconditional_conditioning=None,
-                      dynamic_threshold=None, disable_prints=True, plot=False, plot_batch_idx=None, save_dir=None):
+                      dynamic_threshold=None, disable_prints=True, plot=False, activations=False, plot_batch_idx=None, save_dir=None):
         # plot every 10 timesteps, until last 10 steps where we plot every step
         plot_timestep = True if (index < 10 or index % 10 == 9) else False
 
-        if plot and plot_timestep:
+        if (plot and plot_timestep) or (activations and plot_timestep):
             layer_hooks = register_data_collector_hooks(self.model.model, args=self.model.args) # TODO: need to register forward hooks
-        
+
+
         b, *_, device = *x.shape, x.device
 
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
@@ -272,6 +283,18 @@ class DDIMSampler(object):
             assert (self.model.args.accelerator is None or self.model.args.accelerator.is_main_process), "should only run from main process"
             plot_activations(self.model.model, layer_hooks, i=plot_batch_idx, timestep=index, save_dir=save_dir, args=self.model.args)
             # plot activations
+
+        # After sampling loop, collect activation statistics
+        if plot_timestep and (activations and layer_hooks is not None):
+            df = collect_activation_statistics(layer_hooks)
+            print(f"finished with collection activation statistics for timestep {plot_timestep}")
+            # Save DataFrame to CSV
+            if save_dir is not None:
+                os.makedirs(save_dir, exist_ok=True)
+                df.to_csv(os.path.join(save_dir, f'activation_statistics_{index}.csv'), index=True)
+            else:
+                # If no save_dir is provided, print the DataFrame
+                print(df)
 
         return x_prev, pred_x0
 

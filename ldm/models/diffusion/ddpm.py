@@ -835,7 +835,7 @@ class LatentDiffusion(DDPM):
         return loss
 
     # sample images for validation and testing
-    def sample_images(self, batch, batch_idx=None, epoch=None, save_dir=None, plot=False):
+    def sample_images(self, batch, batch_idx=None, epoch=None, save_dir=None, plot=False, activations = False):
         sampler = DDIMSampler(self)
         
         images, prompts = batch[self.first_stage_key], batch[self.cond_stage_key]
@@ -858,6 +858,7 @@ class LatentDiffusion(DDPM):
                                     x_T=None, # no fixed code
                                     disable_prints=True,
                                     plot=plot,
+                                    activations = activations,
                                     plot_batch_idx=batch_idx,
                                     save_dir=save_dir)
 

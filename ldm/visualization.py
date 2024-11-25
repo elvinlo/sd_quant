@@ -7,33 +7,87 @@ import torch.nn.functional as F
 
 
 class LayerDataCollector():
-    def __init__(self, name):
+    def __init__(self, name, layer_num, layer_type):
         self.name = name
-        self.layer_data = []
+        self.layer_num = layer_num
+        self.layer_type = layer_type
+        self.activations = []
 
     def __call__(self, module, input, output):
         # Collect the output activations
-        self.layer_data.append(output.detach().cpu())
+        self.activations.append(output.detach().cpu())
 
 def register_data_collector_hooks(model, args=None):
     layer_hooks = []
     layer_num = 0
-
+    layer_count = 0
     for name, m in model.named_modules():
-        if args.plot_layer is None or \
-           args.plot_layer == layer_num or \
-           (isinstance(args.plot_layer, str) and args.plot_layer in name) or \
-           (isinstance(args.plot_layer, list) and layer_num in args.plot_layer):
-            m.plot = True
-            m.plot_this_batch = True
-
-            # Initialize the data collector with the layer name
-            hook = LayerDataCollector(name)
+        # Collect activations for linear and conv layers only
+        if args.activations and isinstance(m, (torch.nn.Linear, torch.nn.Conv2d)):
+            # print(str(layer_num) + "\n")
+            # Initialize the data collector with the layer name, number, and type
+            layer_type = type(m).__name__
+            hook = LayerDataCollector(name, layer_num, layer_type)
             handle = m.register_forward_hook(hook)
             layer_hooks.append((hook, handle))
-        layer_num += 1
+            layer_count += 1
+        # elif args.plot_layer is None or \
+        #    args.plot_layer == layer_num or \
+        #    (isinstance(args.plot_layer, str) and args.plot_layer in name) or \
+        #    (isinstance(args.plot_layer, list) and layer_num in args.plot_layer):
+        #     m.plot = True
+        #     m.plot_this_batch = True
 
+        #     # Initialize the data collector with the layer name
+        #     hook = LayerDataCollector(name)
+        #     handle = m.register_forward_hook(hook)
+        #     layer_hooks.append((hook, handle))
+        layer_num += 1
+    print (layer_count)
     return layer_hooks
+
+# Collects activation stats and returns it in a pd dataframe
+def collect_activation_statistics(layer_hooks):
+    import pandas as pd
+
+    # Collect data and layer info
+    stats_list = []
+    count = 0
+    for (hook, handle) in layer_hooks:
+        print(f"new hook {count} \n")
+        # Remove the hook
+        handle.remove()
+
+        activations_list = hook.activations
+        if len(activations_list) == 0:
+            continue
+        # Combine all collected activations for the layer (list of tensors)
+        activations_tensor = torch.cat(activations_list, dim=0)
+        activations_np = activations_tensor.numpy().flatten()
+
+        # Calculate statistical metrics
+        stats = {
+            'layer_num': hook.layer_num,
+            'layer_name': hook.name,
+            'layer_type': hook.layer_type,
+            'mean': np.mean(activations_np),
+            'std': np.std(activations_np),
+            'min': np.min(activations_np),
+            'max': np.max(activations_np),
+            'percentile_2': np.percentile(activations_np, 2),
+            'percentile_5': np.percentile(activations_np, 5),
+            'percentile_95': np.percentile(activations_np, 95),
+            'percentile_98': np.percentile(activations_np, 98),
+            'percentile_99.5': np.percentile(activations_np, 99.5),
+        }
+        stats_list.append(stats)
+        count += 1
+
+    # Create pandas DataFrame
+    df = pd.DataFrame(stats_list)
+    # Set index to layer number
+    df.set_index('layer_num', inplace=True)
+    return df
 
 
 def plot_activations(model, layer_hooks, i=0, timestep=None, save_dir=None, args=None):
