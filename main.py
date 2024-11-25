@@ -7,6 +7,7 @@ import shutil
 import yaml
 import copy
 import numpy as np
+import pandas as pd
 
 from packaging import version
 from omegaconf import OmegaConf
@@ -171,7 +172,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
 
 
 def evaluate_accuracy(model, dataloader=None, args=None):
-    print (args.activations)
+    print(args.activations)
     model.eval()
     save_dir = f'./results/{args.experiment_str}/'
     
@@ -286,7 +287,7 @@ if __name__ == "__main__":
     train_dataloader, val_dataloader, test_dataloader = data._train_dataloader(), data._val_dataloader(), data._test_dataloader()
 
     # TODO: quantization
-
+    ### ----- Dynamic Quantization ------
     def quantize_weight(tensor, num_bits=8):
         qmin = -(2 ** (num_bits - 1))
         qmax = (2 ** (num_bits - 1)) - 1
@@ -340,6 +341,63 @@ if __name__ == "__main__":
             if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
                 module.register_forward_hook(activation_quantization_hook)
 
+    ### ----- Static Quantization ------
+    def quantize_weight_static(tensor, max, num_bits=8):
+        qmin = -(2 ** (num_bits - 1))
+        qmax = (2 ** (num_bits - 1)) - 1
+
+        max_val = max
+        if max_val == 0:
+            scale = 1.0
+        else:
+            scale = max_val / qmax
+
+        # Quantize
+        q_x = (tensor / scale).round().clamp(qmin, qmax)
+        # Dequantize
+        dq_x = q_x * scale
+
+        return dq_x
+
+    def quantize_model_weights_static(model, df, num_bits=8):
+        layer_num = 0;
+        for name, module in model.named_modules():
+            if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
+                layer_max = max(np.abs(df[df["layer_num"] == layer_num]["max"].values[0]),
+                                np.abs(df[df["layer_num"] == layer_num]["min"].values[0]))
+                with torch.no_grad():
+                    module.weight.data = quantize_weight_static(module.weight.data, layer_max, num_bits)
+                    if module.bias is not None:
+                        module.bias.data = quantize_weight_static(module.bias.data, layer_max, num_bits)
+            layer_num += 1
+
+    def quantize_activation_static(tensor, num_bits=8):
+        qmin = 0
+        qmax = (2 ** num_bits) - 1
+
+        min_val = tensor.min()
+        max_val = tensor.max()
+        if min_val == max_val:
+            scale = 1.0
+            zero_point = 0
+        else:
+            scale = (max_val - min_val) / (qmax - qmin)
+            zero_point = qmin - min_val / scale
+
+        # Quantize
+        q_x = ((tensor / scale) + zero_point).round().clamp(qmin, qmax)
+        # Dequantize
+        dq_x = (q_x - zero_point) * scale
+
+        return dq_x
+
+    def activation_quantization_hook_static(module, input, output):
+        return quantize_activation_static(output, num_bits=8)
+
+    def register_activation_quantization_hooks_static(model):
+        for name, module in model.named_modules():
+            if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
+                module.register_forward_hook(activation_quantization_hook_static)
     
     # load from checkpoint
     if args.checkpoint is None or not os.path.isfile(args.checkpoint):
@@ -375,6 +433,9 @@ if __name__ == "__main__":
         register_activation_quantization_hooks(model.model)
     elif args.static_quantize:
         print(f"Applying static {args.quantize_bitwidth}-bit quantization (W{args.quantize_bitwidth}A8) to the model's Linear and Conv2d layers...")
+        df = pd.read_csv('static_activation_stats/total_activation_statistics.csv')
+        quantize_model_weights_static(model.model, df=df, num_bits=args.quantize_bitwidth)
+        register_activation_quantization_hooks_static(model.model)
 
 
     model = model.to(args.device)

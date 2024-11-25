@@ -54,7 +54,7 @@ def collect_activation_statistics(layer_hooks):
     stats_list = []
     count = 0
     for (hook, handle) in layer_hooks:
-        print(f"new hook {count} \n")
+        # print(f"new hook {count} \n")
         # Remove the hook
         handle.remove()
 
@@ -74,10 +74,12 @@ def collect_activation_statistics(layer_hooks):
             'std': np.std(activations_np),
             'min': np.min(activations_np),
             'max': np.max(activations_np),
+            'percentile_1': np.percentile(activations_np, 1),
             'percentile_2': np.percentile(activations_np, 2),
             'percentile_5': np.percentile(activations_np, 5),
             'percentile_95': np.percentile(activations_np, 95),
             'percentile_98': np.percentile(activations_np, 98),
+            'percentile_99': np.percentile(activations_np, 99),
             'percentile_99.5': np.percentile(activations_np, 99.5),
         }
         stats_list.append(stats)

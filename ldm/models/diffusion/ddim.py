@@ -207,6 +207,8 @@ class DDIMSampler(object):
                       dynamic_threshold=None, disable_prints=True, plot=False, activations=False, plot_batch_idx=None, save_dir=None):
         # plot every 10 timesteps, until last 10 steps where we plot every step
         plot_timestep = True if (index < 10 or index % 10 == 9) else False
+        # When collecting static quantization information collect for all timesteps
+        # plot_timestep = True
 
         if (plot and plot_timestep) or (activations and plot_timestep):
             layer_hooks = register_data_collector_hooks(self.model.model, args=self.model.args) # TODO: need to register forward hooks
